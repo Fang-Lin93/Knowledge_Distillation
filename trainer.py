@@ -1,4 +1,3 @@
-
 import torch
 import time
 from torch import nn
@@ -7,36 +6,43 @@ import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 from loguru import logger
 
+device = torch.device('cuda:0') if torch.cuda.is_available() else torch.device('cpu')
+
 
 class ModelTrainer:
     """
     model trainer for SL models
     """
+
     def __init__(self, model, **kwargs):
 
         self.writer = SummaryWriter()
-        self.device = kwargs.get('device', torch.device('cpu'))
+        self.device = kwargs.get('device', device)
         self.model = model.to(self.device)
-        self.N_epochs = kwargs.get('N_epochs', 20)
-        self.lr = kwargs.get('lr', 1e-3)
-        self.lr_decay = kwargs.get('lr_decay', 1)
+        self.N_epochs = kwargs.get('N_epochs', 200)
+        self.lr = kwargs.get('lr', 1e-2)
+        self.lr_decay = kwargs.get('lr_decay', 0.5)
         self.lr_sch_per = kwargs.get('lr_sch_per', 10)
         self.tag = kwargs.get('tag', '')
-        self.l2_regular = kwargs.get('l2_regular', 1e-3)
-        self.tolerance = kwargs.get('tolerance', 5)
-        self.early_stop = kwargs.get('early_stop', True)
+        self.l2_regular = kwargs.get('l2_regular', 5e-4)
+        self.tolerance = kwargs.get('tolerance', 10)
+        self.early_stop = kwargs.get('early_stop', False)
         self.max_acc = -1
         self.min_loss = float('inf')
         self.non_improve = 0
 
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr, weight_decay=self.l2_regular)
+        # self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr, weight_decay=self.l2_regular)
+        self.optimizer = torch.optim.SGD(self.model.parameters(), lr=self.lr, weight_decay=self.l2_regular)
+        self.teacher = kwargs.get('teacher', None)
+        if self.teacher is not None:
+            self.teacher.to(self.device)
 
     def loss_function(self, inputs, targets):
         """
         Overwrite this by loss functions
         :return: loss, predictions
         """
-        return self.model.train_loop(inputs, targets, self.device)
+        return self.model.train_loop(inputs, targets, self.teacher)
         # inputs, targets = inputs.to(self.device), targets.to(self.device)
         # logits = self.model(inputs)
         # return F.cross_entropy(logits, targets), logits.argmax(dim=1)
@@ -49,6 +55,7 @@ class ModelTrainer:
         num_batches = len(train_loader)
         lr = self.lr
         self.model.train()
+
         self.max_acc = -1
         self.min_loss = float('inf')
         self.non_improve = 0
@@ -63,7 +70,7 @@ class ModelTrainer:
             rec_num = self.train_loop(train_loader, val_loader, epoch, rec_num, num_batches)
 
             logger.info(f' Epoch {epoch}: {(time.time() - start_time):.3f}s, '
-                         f'Remaining: {(time.time() - start_time) / (epoch + 1) * (self.N_epochs - (epoch + 1)):.3f}s')
+                        f'Remaining: {(time.time() - start_time) / (epoch + 1) * (self.N_epochs - (epoch + 1)):.3f}s')
 
             # Check early stopping!
             if self.early_stop and self.non_improve >= self.tolerance:
@@ -71,8 +78,10 @@ class ModelTrainer:
                 break
         self.model.eval()
 
+        return self.max_acc
+
     def train_loop(self, train_loader, val_loader, epoch, rec_num, num_batches):
-        logger.info(f'Epoch {epoch} =======================')
+        logger.debug(f'Epoch {epoch} =======================')
         for batch_id, (x, y) in enumerate(train_loader):
             self.optimizer.zero_grad()
             x, y = x.to(self.device), y.to(self.device)
@@ -85,9 +94,9 @@ class ModelTrainer:
             self.writer.add_scalar(f'{self.tag}_acc', acc, rec_num)
             rec_num += 1
             if batch_id % 100 == 0:
-                logger.info(f'Train ({self.tag}) [{batch_id}/{num_batches}]'
-                            f'({100. * batch_id / num_batches:.0f}%)]'
-                            f'\tLoss: {loss.detach():.6f}\tAcc: {100 * acc.detach():.2f}%')
+                logger.debug(f'Train ({self.tag}) [{batch_id}/{num_batches}]'
+                             f'({100. * batch_id / num_batches:.0f}%)]'
+                             f'\tLoss: {loss.detach():.6f}\tAcc: {100 * acc.detach():.2f}%')
         if val_loader:
             self.test(val_loader, epoch)
             self.model.train()
@@ -122,4 +131,3 @@ class ModelTrainer:
             if epoch is not None:
                 self.writer.add_scalar(f'Test_loss {self.tag}', avg_loss, epoch)
                 self.writer.add_scalar(f'Test_Acc {self.tag}', acc, epoch)
-
